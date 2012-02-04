@@ -396,7 +396,7 @@ postcommit(timeout, StateData = #state{postcommit = [Hook | Rest],
     %% Process the next hook - gives sys:get_status messages a chance if hooks
     %% take a long time.  No checking error returns for postcommit hooks.
     {ReplyObj, UpdPutCore} =  riak_kv_put_core:final(PutCore),
-    invoke_hook(Hook, ReplyObj),
+    decode_postcommit(invoke_hook(Hook, ReplyObj)),
     {next_state, postcommit, StateData#state{postcommit = Rest,
                                              putcore = UpdPutCore}, 0};
 postcommit(request_timeout, StateData) -> % still process hooks even if request timed out
@@ -405,6 +405,28 @@ postcommit(Reply, StateData = #state{putcore = PutCore}) ->
     %% late responses - add to state.  *Does not* recompute finalobj
     UpdPutCore = riak_kv_put_core:add_result(Reply, PutCore),
     {next_state, postcommit, StateData#state{putcore = UpdPutCore}, 0}.
+
+decode_postcommit({erlang, {M,F}, Res}) ->
+    case Res of
+        fail ->
+            riak_kv_stat:update(postcommit_fail),
+            lager:error("Post-commit hook ~p:~p failed, no reason given",
+                       [M, F]);
+        {fail, Reason} ->
+            riak_kv_stat:update(postcommit_fail),
+            lager:error("Post-commit hook ~p:~p failed with reason ~p",
+                        [M, F, Reason]);
+        {'EXIT', _, _, Class, Ex} ->
+            riak_kv_stat:update(postcommit_fail),
+            Stack = erlang:get_stacktrace(),
+            lager:error("Problem invoking post-commit hook ~p:~p -> ~p:~p~n~p",
+                        [M, F, Class, Ex, Stack]),
+            ok; 
+        _ -> ok
+    end;
+decode_postcommit({error, {invalid_hook_def, Def}}) ->
+    riak_kv_stat:update(postcommit_fail),
+    lager:error("Invalid post-commit hook definition ~p", [Def]).
 
 finish(timeout, StateData = #state{timing = Timing, reply = Reply}) ->
     case Reply of
